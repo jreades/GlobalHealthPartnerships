@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 #############################
-# This code is designed to extract data from the 
-# referenced Google spreadsheet and to convert that
-# to a Shapefile of 'densified' lines that will 
-# enable us to show great circle lines between the
-# pair of institutions. 
+# This code is designed to extract data from a downloaded 
+# copy of the original Google spreadsheet and to convert 
+# that to a Shapefile of 'densified' lines that will 
+# enable us to show great circle lines between every
+# pair of institutions. In an ideal world we'd talk 
+# directly to Google, but the gspread library doesn't seem
+# to offer any kind of straightforward pandas integration.
 #
 # In the script, we are looking for is a way to take 
 # a text label for location and to obtain coordinates 
@@ -16,18 +18,10 @@
 # route between the two. The line is broken into  
 # multiline segments that ensure it won't get re-drawn
 # as a straight line in a projection.
-# 
-# User-specified setting:
-# -----------------------
-# 1. Type of view
-view = 'Default'  # Standard Robinson projection centered on the Atlantic
-#view = 'Alternate' # Robinson-type projection centered on the Pacific (-lon0 = 150)
-#############################
-
+#
 import os
 import re
 import math
-import gspread 
 import numpy as np
 import requests
 import wikipedia
@@ -36,18 +30,37 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point, LineString, MultiLineString
 from geographiclib.geodesic import Geodesic
+#
+# User-specified setting:
+# -----------------------
+# 1. Type of view to create:
+view = 'Default'  # Standard Robinson projection centered on the Atlantic
+#view = 'Alternate' # Robinson-type projection centered on the Pacific (-lon0 = 150)
+# 2. Where to store geographical lookup data:
+wd    = os.path.join(os.path.expanduser("~"),"Desktop","Global Health Partnerships") # Change this if you want to cache data elsewhere
+pikdf = './Global Health Partnership Data - Data.pickle'
+pik1  = './Global Health Partnership Data - University Locations.pickle'
+pik2  = './Global Health Partnership Data - Partner Locations.pickle'
+data  = './Global Health Partnership Data - Data.pickle'
+gDoc  = '1NGhB1WGn1nFfe77vs_Tz2NezxJE_KDmnzmEjubmsgXQ'
+gId   = '1251708298'
+#############################
 
 # Function to extract coordinates from
 # Wikipedia web page. Uses wikipedia lib.
 # To resolve a DisambiguationError you'll 
-# have to look at the Wikipedia site in order
+# have to look at the Wikipedia site in order
 # to find out exactly what the best title is
 # to ensure that one and only one page is 
 # returned from the title parameter.
 def getCoordinates(title):
-	"""
-	: title: Specify the unique Wikipedia title for the page to be retrieved
-	"""
+    """
+    Look for a coordinate pair in the Wikipedia
+    page referenced by the the title. Suggest 
+    using findCoordinates instead.
+    
+    title -- the unique Wikipedia title for the page to be retrieved
+    """
     # Figure it's helpful to say what we're looking for
     # in case things go wrong
     print("Fetching Wikipedia page for: " + title)
@@ -75,13 +88,18 @@ def getCoordinates(title):
 # to try to rip it out of the location URL
 # embedded in the page.
 def getLocation(title, pattern='locality'):
-	"""
-	: title: Specify the unique Wikipedia title for the page to be retrieved
-	: pattern: defaults to "locality", but can be overridden if the coordinates are stored elsewhere
-	"""
+    """
+    Retrieve location data by looking for a link
+    that seems to contain a locality (or other
+    keyword clue). Suggest using findCoordinates
+    instead.
+    
+    title -- specify the unique Wikipedia title for the page to be retrieved
+    pattern -- a pattern to search for in links which carry location data (default: 'locality')
+    """
     # Figure it's helpful to say what we're doing
     # in case things go wrong
-    print("Falling back to raw Wikipedia page: " + pg.url)
+    print("Falling back to raw Wikipedia page: " + title)
     
     # Create a Wikipedia parser
     pg = wikipedia.page(title)
@@ -92,6 +110,13 @@ def getLocation(title, pattern='locality'):
     # to cover most eventualities.
     f      = requests.get(pg.url)
     coord  = f.text.find(pattern)
+    
+    # Check to see if we got a value since 
+    # this doesn't always work...
+    if coord == -1:
+        # Try city = since that seems to work
+        coord = f.text.find('city = ')
+    
     # Extract the next 200 characters from the
     # starting point of our pattern match
     substr = f.text[(coord):(coord + 200)]
@@ -118,12 +143,13 @@ def getLocation(title, pattern='locality'):
 # itself, or with the object referenced
 # as a 'Location' somewhere on the page.
 def findCoordinates(title):
-	"""
-	This should be called by most users as it is simply
-	a wrapper function for the two _other_ ways of searching
-	for coordinates on a Wikipedia page.
-	: title: Specify the unique Wikipedia title for the page to be retrieved
-	"""
+    """
+    This should be called by most users as it is simply
+    a wrapper function for the two _other_ ways of searching
+    for coordinates on a Wikipedia page.
+    
+    title -- the unique Wikipedia title for the page to be retrieved
+    """
     cPair = getCoordinates(title)
     if cPair is None:
         cLoc = getLocation(title)
@@ -141,15 +167,16 @@ def findCoordinates(title):
 # geographer or a computer scientist.
 def getGreatCircleFromFloats(starty, startx, endy, endx, geod=Geodesic.WGS84):
     """
-    Function for calculating great circle routes. Uses
+    Utility function for calculating great circle routes. Uses
     floats for inputs; these are expected to be derived 
     from WGS84 coordinates because we've initialised geod
     as WGS84 Geodesic object.
-    : starty: the starting latitude point in WGS84
-    : startx: the starting longitude point in WGS84
-    : endy: the ending latitude point in WGS84
-    : endx: the ending longitude point in WGS84
-    : geod: initialised by default as a Geodesic.WGS84 object
+    
+    starty -- the starting latitude point in WGS84
+    startx -- the starting longitude point in WGS84
+    endy -- the ending latitude point in WGS84
+    endx -- the ending longitude point in WGS84
+    geod -- a geodesic object (default: Geodesic.WGS84)
     """
     # If we couldn't get useable coordinates
     # then just return None since we can't 
@@ -160,7 +187,7 @@ def getGreatCircleFromFloats(starty, startx, endy, endx, geod=Geodesic.WGS84):
     # We don't particularly care about the Y, but having 
     # the startx be less than than that start y helps to 
     # ensure that the line gets drawn consistently. Otherwise
-    # you might see most of the lines following a normal 
+    # you might see most of the lines following a normal 
     # path and then one that runs much further to the East 
     # or West because it should be wrapping around and isn't.
     if (startx > endx):
@@ -171,50 +198,51 @@ def getGreatCircleFromFloats(starty, startx, endy, endx, geod=Geodesic.WGS84):
     # The bulk of the work is simply drawing this inverse
     # line now that we've got the coordinates sorted out.
     l = geod.InverseLine(float(starty), float(startx), float(endy), float(endx),
-                    Geodesic.LATITUDE | Geodesic.LONGITUDE) # | Geodesic.LONG_UNROLL)
+                    Geodesic.LATITUDE | Geodesic.LONGITUDE | Geodesic.LONG_UNROLL)
 	
     # Initialise the arc information
     da = 1; n = int(math.ceil(l.a13 / da)); da = l.a13 / n
 
-    # Try to deal with break at -180 (int'l dateline)
+    # Try to deal with break at -180 (ca. int'l dateline)
     ml = list() # list of line lists
     line = list() # empty list for a new line
-    lastLon = None # track where we jump across the dateline
+    lastLon = None # track where we jump across the dateline
 
     for i in range(n + 1):
         a = da * i
         g = l.ArcPosition(a, Geodesic.LATITUDE |
                              Geodesic.LONGITUDE | Geodesic.LONG_UNROLL)
 
-        # if view == 'Default':
-        #     if lastLon is not None and ((g['lon2'] <= -180 and lastLon >= -180) or (g['lon2'] >= 180 and lastLon <= 180)):
-        #         if len(line) > 1:
-        #             #print("Breaking line at: " + str(line))
-        #             ml.append(line)
-        #             line = list()
-        #             #print("--- break ---")
-        # elif view == 'Alternate':
-        #     if lastLon is not None and ((g['lon2'] <= -330 and lastLon >= -330) or (g['lon2'] >= 30 and lastLon <= 30)):
-        #         if len(line) > 1:
-        #             #print("Breaking line at: " + str(line))
-        #             ml.append(line)
-        #             line = list()
-        #             #print("--- break ---")
+        if view == 'Default':
+            if lastLon is not None and ((g['lon2'] <= -180 and lastLon >= -180) or (g['lon2'] >= 180 and lastLon <= 180)):
+                if len(line) > 1:
+                    #print("Breaking line at: " + str(line))
+                    ml.append(line)
+                    line = list()
+                    #print("--- break ---")
+        elif view == 'Alternate':
+            if lastLon is not None and ((g['lon2'] <= -330 and lastLon >= -330) or (g['lon2'] >= 30 and lastLon <= 30)):
+                if len(line) > 1:
+                    #print("Breaking line at: " + str(line))
+                    ml.append(line)
+                    line = list()
+                    #print("--- break ---")
 
         # Copy to a new variable to make it
         # easier to see what's happening
         x = g['lon2']
         y = g['lat2']
-        # if view == 'Default': # Standard Robinson projection centered on Atlantic
-        #     if x < -180:
-        #         x = 180 - (abs(x) - 180)
-        #     elif x > 180:
-        #         x = -180 + (abs(x) - 180)
-        # elif view == 'Alternate': # Robinson projection centered on Pacific
-        #     if x < -330:
-        #         x = 30 - (abs(x) - 330)
-        #     elif x > 30:
-        #         x = -330 + (abs(x) - 30)
+        
+        if view == 'Default': # Standard Robinson projection centered on Atlantic
+            if x < -180:
+                x = 180 - (abs(x) - 180)
+            elif x > 180:
+                x = -180 + (abs(x) - 180)
+        elif view == 'Alternate': # Robinson projection centered on Pacific
+            if x < -330:
+                x = 30 - (abs(x) - 330)
+            elif x > 30:
+                x = -330 + (abs(x) - 30)
         line.append(Point(x, y))
         lastLon = g['lon2']
         #print "{:.5f} {:.5f}".format(g['lat2'], g['lon2'])
@@ -222,7 +250,7 @@ def getGreatCircleFromFloats(starty, startx, endy, endx, geod=Geodesic.WGS84):
     # Append the last line that was running
     # unless it's a single point, in which
     # case we want to stick it on to the
-    # previous multi-line string
+    # previous multi-line string
     if len(line) > 1:
         ml.append(line)
 	
@@ -233,14 +261,17 @@ def getGreatCircleFromFloats(starty, startx, endy, endx, geod=Geodesic.WGS84):
         #LineString(lineElems)
     return MultiLineString(ml)
 
+# If, howeve, you are working with points then this helper
+# function will be rather useful at it sorts it out for you.
 def getGreatCircleFromPoints(start, end, geod=Geodesic.WGS84):
     """
     Utility function that allows us to use Point 
     class objects instead of raw floats to calculate
     the great circle route.
-    : start: a shapely.Point object
-    : end: a shapely.Point object
-    : geod: initialised by default as a Geodesic.WGS84 object
+    
+    start -- a shapely.Point object
+    end -- a shapely.Point object
+    geod -- geodesic object (default: Geodesic.WGS84)
     """
     if type(start) is not Point:
         #print("Start is not a Point: " + str(type(start)))
@@ -251,50 +282,68 @@ def getGreatCircleFromPoints(start, end, geod=Geodesic.WGS84):
     else:
         return getGreatCircleFromFloats(start.y, start.x, end.y, end.x, geod)
 
-# I'm keeping this stuff in Dropbox for now
-# -- may need to change
-os.chdir(os.path.expanduser("~"))
-if os.path.exists("./Dropbox/Global Health"):
-    os.chdir("./Dropbox/Global Health")
-else:
-    os.chdir("./Documents/Dropbox/Global Health")
+######
+# Change the default location to the one specified in wd
+if not os.path.exists(wd):
+    os.mkdir(wd, 0750)
+    print("Created " + wd + " to store output from script.")
+os.chdir(wd)
+
+######
+# A quick check to see if the cached data is still
+# valid -- simplest way is to ask the user directly.
+if os.path.isfile(pik1) and os.path.isfile(pik2) and os.path.isfile(data):
+    print("Found existing lookup files for this script")
+    print("You need to remove them to rebuild a file from scatch;\ne.g. after an update to the Google spreadsheet")
+    toDelete = 'n' #input('Should I delete and rebuild these (only if data has changed) [y/n]: ')
+    if toDelete == 'y':
+        print("   OK, tidying up.")
+        if os.path.exists(pik1):
+            os.remove(pik1)
+        if os.path.exists(pik2):
+            os.remove(pik2)
+        if os.path.exists(data):
+            os.remove(data)
 
 ###############
-# Load the appropriate XLSX from Dropbox
-df = pd.read_excel('./Global Health Partnership Data - 20160607.xlsx')
+# Retrieve the data from Google if 
+# we don't already have a copy...
+if os.path.isfile(pikdf):
+    print("Restoring cached Google data from pickle...")
+    df = pd.read_pickle(pikdf)
+else:
+    df = pd.read_csv('https://docs.google.com/spreadsheets/d/' + 
+                   gDoc +
+                   '/export?gid=' + 
+                   gId + 
+                   '&format=csv')
 
-# Reformat the column names to something
-# that is easier to work with in Python
-cols  = list(df.columns.values)
-ncols = list()
-for c in cols:
-    c = c.strip()
-    c = c.strip(',;?"!')
-    ncols.append(re.sub(' ','_',re.sub('^partner ','p',c)))
-#print(ncols)
-df.columns = ncols
-del(cols, ncols, c)
+    ###############
+    # Tidying up...
+    #
+    # Reformat the column names to something
+    # that is easier to work with in Python
+    cols  = list(df.columns.values)
+    ncols = list()
+    for c in cols:
+        c = c.strip()
+        c = c.strip(',;?"!')
+        ncols.append(re.sub(' ','_',re.sub('^partner ','p',c)))
+    df.columns = ncols
+    del(cols, ncols, c)
+    df.to_pickle(pikdf)
 
 # Fill in the missing data by column
 # using the forward fill feature of pandas.
 # Notice that we can only do to this for
 # columns that are meant to be fully
-# populated.
+# populated and not all columns need this.
 for col in ['university','city','country','has_global_health_programme','has_global_health_partnership']:
     df[col] = df[col].ffill()
-
-######
-# Would be good to add a quick check to see if the
-# Excel file has been modified since we last created
-# the pickles below -- if so then we need to check
-# that we've not got a meaningful change and update
-# if necessary
-######
 
 # Now find the locations of all of the universities
 # -- many will have this on the Wikipedia page, but
 # a few of them list only the town/city.
-pik1 = './Global Health Partnership Data - University Locations.pickle'
 if os.path.isfile(pik1):
     print("Restoring university locations from pickle...")
     cdf = pd.read_pickle(pik1)
@@ -322,9 +371,12 @@ else:
     cdf = pd.DataFrame(data=d)
     cdf.to_pickle(pik1)
 
-cdf.head()
+print("First few rows of university location lookup:")
+print(cdf.head())
 
-pik2 = './Global Health Partnership Data - Partner Locations.pickle'
+# Now find the locations of all of the partners
+# -- many will not have this on the Wikipedia page, 
+# in which case we fall back to their city location.
 if os.path.isfile(pik2):
     print("Restoring partner locations from pickle...")
     pdf = pd.read_pickle(pik2)
@@ -362,6 +414,9 @@ else:
     pdf = pd.DataFrame(data=d)
     pdf.to_pickle(pik2)
 
+print("First few rows of partner location lookup:")
+print(pdf.head())
+
 # And write out the partner df as a
 # shapefile.
 crs = None
@@ -369,7 +424,7 @@ geometry = [Point(xy) for xy in zip(pdf.lon, pdf.lat)]
 pgdf     = gpd.GeoDataFrame(pdf, crs=crs, geometry=geometry)
 pgdf.drop('lat', axis=1, inplace=True)
 pgdf.drop('lon', axis=1, inplace=True)
-pgdf.crs = {'init':'epsg:4326'} # Set up QGIS map in EPSG:3395?
+pgdf.crs = {'init':'epsg:4326'} # Set up QGIS in EPSG:3395?
 pgdf.to_file('Global Health Partner Locations.shp')
 pgdf.head()
 
@@ -379,7 +434,7 @@ geometry = [Point(xy) for xy in zip(cdf.lon, cdf.lat)]
 cgdf     = gpd.GeoDataFrame(cdf, crs=crs, geometry=geometry)
 cgdf.drop('lat', axis=1, inplace=True)
 cgdf.drop('lon', axis=1, inplace=True)
-cgdf.crs = {'init':'epsg:4326'} # Set up QGIS map in EPSG:3395?
+cgdf.crs = {'init':'epsg:4326'} 
 cgdf.to_file('Global Health Institution Locations.shp')
 cgdf.head()
 
@@ -390,20 +445,20 @@ gdf = pd.merge(gdft, pgdf, how='left', left_on='pcity', right_on='location')
 gdf.head()
 del(gdft)
 
-#getGreatCircleFromPoints(gdf.geometry_x[0], gdf.geometry_y[0]) # Should be an error if first institution has no partners
-#getGreatCircleFromPoints(gdf.geometry_x[1], gdf.geometry_y[1]) # Should return a LineString as second institution has one or more partners
-
 # Now get a linestring for every row in the data frame
 def applyCircleRoute(row):
+    """
+    This allows us to turn a line into a great circle
+    """
     #print('Creating great circle for ' + str(row.university) + ', ' + str(row.pinstitution))
     return getGreatCircleFromPoints(row.geometry_x, row.geometry_y)
 
+# And apply the function to the right column 
+# in the GeoPandas data frame.
 if 'Path' in gdf.columns:
     gdf.drop('Path', axis=1, inplace=True)
 gdf['Path'] = gdf.apply(applyCircleRoute, axis=1)
 gdf.head()
-
-#gdf.ix[gdf.university=='Yale University',]
 
 # Now convert gdf to something that can be written
 # out as a shapefile...
@@ -414,5 +469,7 @@ t.head()
 # Remove non-existent lines
 t = t.ix[pd.notnull(t['pcity']),]
 t.to_file('Global Health Great Circles ' + view + '.shp')
-#with open('Global Health Great Circles.geojson', 'w') as f:
-#    f.write(t.to_json())
+
+# Useful reminder:
+print("You will probably want to set up your GIS with EPSG:54030")
+
