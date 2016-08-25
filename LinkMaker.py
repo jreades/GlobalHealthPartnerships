@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 #############################
+#
+# CC-BY Attribution: You are free to modify this code but 
+# should credit jreades (https://github.com/jreades/) and
+# the others who contributed to this script, notably:
+#
+# http://geographiclib.sourceforge.net/html/python/examples.html#computing-waypoints
+#
 # This code is designed to extract data from a downloaded 
 # copy of the original Google spreadsheet and to convert 
 # that to a Shapefile of 'densified' lines that will 
